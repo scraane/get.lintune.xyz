@@ -113,7 +113,6 @@ else
     esac
 fi
 
-CF_API_TOKEN=""
 if $USE_CADDY; then
     info "Caddy will obtain SSL certificates via Cloudflare DNS challenge."
     info "Create a Cloudflare API token with Zone:DNS:Edit + Zone:Zone:Read for your zone."
