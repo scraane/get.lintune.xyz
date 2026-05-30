@@ -11,7 +11,7 @@ ADMIN_IMAGE=ghcr.io/lintune/lintune-admin:latest
 DASH_IMAGE=ghcr.io/lintune/lintune-dash:latest
 BACKUP_IMAGE=ghcr.io/lintune/lintune-backup:latest
 HEADSCALE_IMAGE=headscale/headscale:latest
-CADDY_IMAGE=ghcr.io/lintune/caddy:latest
+TRAEFIK_IMAGE=traefik:v3
 UPTIME_KUMA_IMAGE=ghcr.io/lintune/lintune-uptimekuma:latest
 VW_IMAGE=vaultwarden/server:latest
 
@@ -99,26 +99,26 @@ printf "\n"
 
 # ── Reverse proxy choice ───────────────────────────────────────────────────────
 
-if [ -n "${USE_CADDY+x}" ]; then
+if [ -n "${USE_TRAEFIK+x}" ]; then
     # Already set in environment — normalise to true/false
-    case "$USE_CADDY" in
-        [nN]*|false) USE_CADDY=false ;;
-        *)           USE_CADDY=true  ;;
+    case "$USE_TRAEFIK" in
+        [nN]*|false) USE_TRAEFIK=false ;;
+        *)           USE_TRAEFIK=true  ;;
     esac
 else
-    USE_CADDY_REPLY=$(ask "Use Caddy as automatic reverse proxy with SSL for admin + dash? [Y/n]")
-    case "$USE_CADDY_REPLY" in
-        [nN]*) USE_CADDY=false ;;
-        *)     USE_CADDY=true  ;;
+    USE_TRAEFIK_REPLY=$(ask "Use Traefik as automatic reverse proxy with SSL? [Y/n]")
+    case "$USE_TRAEFIK_REPLY" in
+        [nN]*) USE_TRAEFIK=false ;;
+        *)     USE_TRAEFIK=true  ;;
     esac
 fi
 
-if $USE_CADDY; then
-    info "Caddy will obtain SSL certificates via Cloudflare DNS challenge."
+if $USE_TRAEFIK; then
+    info "Traefik will obtain SSL certificates via Cloudflare DNS challenge."
     info "Create a Cloudflare API token with Zone:DNS:Edit + Zone:Zone:Read for your zone."
     printf "\n"
     CF_API_TOKEN=${CF_API_TOKEN:-$(ask "Cloudflare API token:")}
-    [ -n "$CF_API_TOKEN" ] || die "Cloudflare API token is required when using Caddy."
+    [ -n "$CF_API_TOKEN" ] || die "Cloudflare API token is required when using Traefik."
 else
     printf "\n"
     info "Admin will be exposed on port 8889, tenant dashboard on port 8888."
@@ -224,42 +224,6 @@ EOF
 
 ok "Headscale config written."
 
-# ── Write Caddyfile (only when using Caddy) ───────────────────────────────────
-
-if $USE_CADDY; then
-    # CF_API_TOKEN is passed via caddy.env at runtime — use Caddy's {$VAR} syntax, not shell expansion
-    cat > "$INSTALL_DIR/Caddyfile" << 'CADDYEOF'
-{
-    acme_dns cloudflare {$CF_API_TOKEN}
-}
-CADDYEOF
-
-    # Append the vhosts with the actual domain names (shell-expanded)
-    cat >> "$INSTALL_DIR/Caddyfile" << EOF
-
-${ADMIN_DOMAIN} {
-    reverse_proxy lintune-admin:80
-}
-
-${DASH_DOMAIN} {
-    reverse_proxy lintune-dash:80
-}
-
-${KUMA_DOMAIN} {
-    reverse_proxy uptime-kuma:3001
-}
-
-${HS_DOMAIN} {
-    reverse_proxy headscale:8080
-}
-
-vault.${BASE_DOMAIN} {
-    reverse_proxy vaultwarden:80
-}
-EOF
-    ok "Caddyfile written."
-fi
-
 # ── Write admin.env ───────────────────────────────────────────────────────────
 
 cat > "$INSTALL_DIR/admin.env" << EOF
@@ -291,12 +255,12 @@ EOF
 chmod 666 "$INSTALL_DIR/admin.env"
 ok "admin.env written."
 
-if $USE_CADDY; then
-    cat > "$INSTALL_DIR/caddy.env" << EOF
+if $USE_TRAEFIK; then
+    cat > "$INSTALL_DIR/traefik.env" << EOF
 CF_API_TOKEN=${CF_API_TOKEN}
 EOF
-    chmod 600 "$INSTALL_DIR/caddy.env"
-    ok "caddy.env written."
+    chmod 600 "$INSTALL_DIR/traefik.env"
+    ok "traefik.env written."
 fi
 
 # ── Write dash.env ────────────────────────────────────────────────────────────
@@ -385,7 +349,7 @@ ok "MariaDB init script written."
 
 # ── Write docker-compose.yml ──────────────────────────────────────────────────
 
-if $USE_CADDY; then
+if $USE_TRAEFIK; then
 
 cat > "$INSTALL_DIR/docker-compose.yml" << EOF
 services:
@@ -413,6 +377,12 @@ services:
     image: ${ADMIN_IMAGE}
     restart: unless-stopped
     env_file: admin.env
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.admin.rule=Host(\`${ADMIN_DOMAIN}\`)"
+      - "traefik.http.routers.admin.entrypoints=websecure"
+      - "traefik.http.routers.admin.tls.certresolver=cloudflare"
+      - "traefik.http.services.admin.loadbalancer.server.port=80"
     volumes:
       - ./admin.env:/var/www/html/lintune-admin/.env
       - ./logs:/var/www/html/lintune-admin/storage/logs/install
@@ -429,6 +399,12 @@ services:
     image: ${DASH_IMAGE}
     restart: unless-stopped
     env_file: dash.env
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dash.rule=Host(\`${DASH_DOMAIN}\`)"
+      - "traefik.http.routers.dash.entrypoints=websecure"
+      - "traefik.http.routers.dash.tls.certresolver=cloudflare"
+      - "traefik.http.services.dash.loadbalancer.server.port=80"
     depends_on:
       db:
         condition: service_healthy
@@ -454,6 +430,12 @@ services:
     image: ${HEADSCALE_IMAGE}
     restart: unless-stopped
     command: serve
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.headscale.rule=Host(\`${HS_DOMAIN}\`)"
+      - "traefik.http.routers.headscale.entrypoints=websecure"
+      - "traefik.http.routers.headscale.tls.certresolver=cloudflare"
+      - "traefik.http.services.headscale.loadbalancer.server.port=8080"
     volumes:
       - ${INSTALL_DIR}/headscale-data:/etc/headscale
     ports:
@@ -461,18 +443,26 @@ services:
     networks:
       - internal
 
-  caddy:
-    image: ${CADDY_IMAGE}
+  traefik:
+    image: ${TRAEFIK_IMAGE}
     restart: unless-stopped
-    env_file: caddy.env
+    env_file: traefik.env
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.cloudflare.acme.dnschallenge=true
+      - --certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.cloudflare.acme.storage=/data/acme.json
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_data:/data
     networks:
       - internal
 
@@ -486,6 +476,12 @@ services:
       - UPTIME_KUMA_DB_NAME=${KUMA_DB_NAME}
       - UPTIME_KUMA_DB_USERNAME=${DB_USERNAME}
       - UPTIME_KUMA_DB_PASSWORD=${DB_PASSWORD}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.kuma.rule=Host(\`${KUMA_DOMAIN}\`)"
+      - "traefik.http.routers.kuma.entrypoints=websecure"
+      - "traefik.http.routers.kuma.tls.certresolver=cloudflare"
+      - "traefik.http.services.kuma.loadbalancer.server.port=3001"
     depends_on:
       db:
         condition: service_healthy
@@ -496,6 +492,12 @@ services:
     image: ${VW_IMAGE}
     restart: unless-stopped
     env_file: vaultwarden.env
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vault.rule=Host(\`vault.${BASE_DOMAIN}\`)"
+      - "traefik.http.routers.vault.entrypoints=websecure"
+      - "traefik.http.routers.vault.tls.certresolver=cloudflare"
+      - "traefik.http.services.vault.loadbalancer.server.port=80"
     volumes:
       - vw_data:/data
     networks:
@@ -503,8 +505,7 @@ services:
 
 volumes:
   db_data:
-  caddy_data:
-  caddy_config:
+  traefik_data:
   vw_data:
 
 networks:
@@ -742,7 +743,7 @@ ok "Vault        : https://vault.${BASE_DOMAIN}  (admin at /admin — token in .
 ok "Status page  : https://${KUMA_DOMAIN}  (credentials set during wizard)"
 ok "VPN Mesh     : https://${HS_DOMAIN}    (enable in setup wizard)"
 
-if ! $USE_CADDY; then
+if ! $USE_TRAEFIK; then
     printf "\n"
     info "Ports exposed on this host:"
     info "  Admin      : 8889  ->  point your proxy to http://$(hostname -I | awk '{print $1}'):8889"
